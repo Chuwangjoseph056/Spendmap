@@ -12,6 +12,11 @@
 (define-constant ERR-INVALID-BUDGET (err u110))
 (define-constant ERR-BUDGET-NOT-FOUND (err u111))
 (define-constant ERR-INVALID-THRESHOLD (err u112))
+(define-constant ERR-CONTRACTOR-NOT-FOUND (err u113))
+(define-constant ERR-CONTRACTOR-SUSPENDED (err u114))
+(define-constant ERR-SPENDING-LIMIT-EXCEEDED (err u115))
+(define-constant ERR-INVALID-RATING (err u116))
+(define-constant ERR-CONTRACTOR-BLACKLISTED (err u117))
 
 (define-fungible-token access-token)
 
@@ -21,6 +26,7 @@
 (define-data-var contract-paused bool false)
 (define-data-var next-budget-id uint u1)
 (define-data-var alert-threshold-percentage uint u80)
+(define-data-var next-contractor-id uint u1)
 
 (define-map spending-records
   { record-id: uint }
@@ -95,6 +101,50 @@
   { total-allocated: uint, total-spent: uint, budget-count: uint }
 )
 
+(define-map contractors
+  { contractor-id: uint }
+  {
+    name: (string-ascii 100),
+    business-registration: (string-ascii 50),
+    contact-principal: principal,
+    registration-date: uint,
+    status: (string-ascii 20),
+    performance-rating: uint,
+    total-contracts-value: uint,
+    completed-contracts: uint,
+    spending-limit: uint,
+    certifications: (list 5 (string-ascii 50)),
+    blacklisted: bool,
+    last-activity: uint
+  }
+)
+
+(define-map contractor-spending-records
+  { contractor-id: uint, spending-record-id: uint }
+  { amount: uint, date: uint, approved: bool }
+)
+
+(define-map contractor-certifications
+  { contractor-id: uint, certification: (string-ascii 50) }
+  { 
+    issued-date: uint,
+    expiry-date: uint,
+    issuing-authority: (string-ascii 100),
+    valid: bool
+  }
+)
+
+(define-map contractor-performance-history
+  { contractor-id: uint, evaluation-id: uint }
+  {
+    evaluator: principal,
+    rating: uint,
+    comments: (string-ascii 200),
+    evaluation-date: uint,
+    contract-value: uint
+  }
+)
+
 (define-read-only (get-contract-info)
   {
     owner: CONTRACT-OWNER,
@@ -147,6 +197,27 @@
 
 (define-read-only (get-fiscal-year-budget (constituency (string-ascii 50)) (fiscal-year uint))
   (map-get? fiscal-year-budgets { constituency: constituency, fiscal-year: fiscal-year })
+)
+
+(define-read-only (get-contractor (contractor-id uint))
+  (map-get? contractors { contractor-id: contractor-id })
+)
+
+(define-read-only (get-contractor-performance (contractor-id uint) (evaluation-id uint))
+  (map-get? contractor-performance-history { contractor-id: contractor-id, evaluation-id: evaluation-id })
+)
+
+(define-read-only (get-contractor-certification (contractor-id uint) (certification (string-ascii 50)))
+  (map-get? contractor-certifications { contractor-id: contractor-id, certification: certification })
+)
+
+(define-read-only (is-contractor-authorized (contractor-id uint))
+  (match (map-get? contractors { contractor-id: contractor-id })
+    contractor-info (and 
+                      (not (get blacklisted contractor-info))
+                      (is-eq (get status contractor-info) "active"))
+    false
+  )
 )
 
 (define-read-only (get-budget-utilization (budget-id uint))
@@ -489,5 +560,225 @@
     (ok true)
   )
 )
+
+(define-public (register-contractor 
+  (name (string-ascii 100))
+  (business-registration (string-ascii 50))
+  (contact-principal principal)
+  (spending-limit uint)
+  (certifications (list 5 (string-ascii 50)))
+)
+  (let (
+    (contractor-id (var-get next-contractor-id))
+  )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (> spending-limit u0) ERR-INVALID-AMOUNT)
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    
+    (map-set contractors
+      { contractor-id: contractor-id }
+      {
+        name: name,
+        business-registration: business-registration,
+        contact-principal: contact-principal,
+        registration-date: stacks-block-height,
+        status: "active",
+        performance-rating: u100,
+        total-contracts-value: u0,
+        completed-contracts: u0,
+        spending-limit: spending-limit,
+        certifications: certifications,
+        blacklisted: false,
+        last-activity: stacks-block-height
+      }
+    )
+    
+    (var-set next-contractor-id (+ contractor-id u1))
+    (ok contractor-id)
+  )
+)
+
+(define-public (update-contractor-status (contractor-id uint) (new-status (string-ascii 20)))
+  (let (
+    (contractor-info (unwrap! (map-get? contractors { contractor-id: contractor-id }) ERR-CONTRACTOR-NOT-FOUND))
+  )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    
+    (map-set contractors
+      { contractor-id: contractor-id }
+      (merge contractor-info { status: new-status })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (blacklist-contractor (contractor-id uint))
+  (let (
+    (contractor-info (unwrap! (map-get? contractors { contractor-id: contractor-id }) ERR-CONTRACTOR-NOT-FOUND))
+  )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    
+    (map-set contractors
+      { contractor-id: contractor-id }
+      (merge contractor-info { blacklisted: true, status: "suspended" })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (whitelist-contractor (contractor-id uint))
+  (let (
+    (contractor-info (unwrap! (map-get? contractors { contractor-id: contractor-id }) ERR-CONTRACTOR-NOT-FOUND))
+  )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    
+    (map-set contractors
+      { contractor-id: contractor-id }
+      (merge contractor-info { blacklisted: false, status: "active" })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (authorize-contractor-spending 
+  (contractor-id uint) 
+  (spending-record-id uint) 
+  (amount uint)
+)
+  (let (
+    (contractor-info (unwrap! (map-get? contractors { contractor-id: contractor-id }) ERR-CONTRACTOR-NOT-FOUND))
+    (new-total (+ (get total-contracts-value contractor-info) amount))
+  )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (is-contractor-authorized contractor-id) ERR-CONTRACTOR-SUSPENDED)
+    (asserts! (<= new-total (get spending-limit contractor-info)) ERR-SPENDING-LIMIT-EXCEEDED)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    
+    (map-set contractor-spending-records
+      { contractor-id: contractor-id, spending-record-id: spending-record-id }
+      { amount: amount, date: stacks-block-height, approved: true }
+    )
+    
+    (map-set contractors
+      { contractor-id: contractor-id }
+      (merge contractor-info { 
+        total-contracts-value: new-total,
+        last-activity: stacks-block-height
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (evaluate-contractor-performance 
+  (contractor-id uint) 
+  (rating uint) 
+  (comments (string-ascii 200))
+  (contract-value uint)
+)
+  (let (
+    (contractor-info (unwrap! (map-get? contractors { contractor-id: contractor-id }) ERR-CONTRACTOR-NOT-FOUND))
+    (evaluation-id (+ (get completed-contracts contractor-info) u1))
+    (new-rating (/ (+ (* (get performance-rating contractor-info) (get completed-contracts contractor-info)) rating) evaluation-id))
+  )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (and (>= rating u1) (<= rating u100)) ERR-INVALID-RATING)
+    (asserts! (> contract-value u0) ERR-INVALID-AMOUNT)
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    
+    (map-set contractor-performance-history
+      { contractor-id: contractor-id, evaluation-id: evaluation-id }
+      {
+        evaluator: tx-sender,
+        rating: rating,
+        comments: comments,
+        evaluation-date: stacks-block-height,
+        contract-value: contract-value
+      }
+    )
+    
+    (map-set contractors
+      { contractor-id: contractor-id }
+      (merge contractor-info { 
+        performance-rating: new-rating,
+        completed-contracts: evaluation-id
+      })
+    )
+    
+    (ok evaluation-id)
+  )
+)
+
+(define-public (add-contractor-certification 
+  (contractor-id uint)
+  (certification (string-ascii 50))
+  (expiry-date uint)
+  (issuing-authority (string-ascii 100))
+)
+  (let (
+    (contractor-info (unwrap! (map-get? contractors { contractor-id: contractor-id }) ERR-CONTRACTOR-NOT-FOUND))
+  )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (> expiry-date stacks-block-height) ERR-EXPIRED)
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    
+    (map-set contractor-certifications
+      { contractor-id: contractor-id, certification: certification }
+      {
+        issued-date: stacks-block-height,
+        expiry-date: expiry-date,
+        issuing-authority: issuing-authority,
+        valid: true
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (revoke-contractor-certification 
+  (contractor-id uint)
+  (certification (string-ascii 50))
+)
+  (let (
+    (cert-info (unwrap! (map-get? contractor-certifications { contractor-id: contractor-id, certification: certification }) ERR-RECORD-NOT-FOUND))
+  )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    
+    (map-set contractor-certifications
+      { contractor-id: contractor-id, certification: certification }
+      (merge cert-info { valid: false })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (update-contractor-spending-limit (contractor-id uint) (new-limit uint))
+  (let (
+    (contractor-info (unwrap! (map-get? contractors { contractor-id: contractor-id }) ERR-CONTRACTOR-NOT-FOUND))
+  )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (> new-limit u0) ERR-INVALID-AMOUNT)
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    
+    (map-set contractors
+      { contractor-id: contractor-id }
+      (merge contractor-info { spending-limit: new-limit })
+    )
+    
+    (ok true)
+  )
+)
+
 
 
